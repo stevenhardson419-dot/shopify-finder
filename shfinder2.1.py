@@ -3427,15 +3427,16 @@ MYSHOPIFY_RE_FULL = re.compile(r"https?://([a-z0-9\-]+)\.myshopify\.com[^\s<>\"'
 
 user_data = {}
 stop_flags = {}
-MAX_PROXY_WORKERS = 500
-MAX_SCRAPE_WORKERS = 300
+MAX_PROXY_WORKERS = 800   # Max for Railway Hobby (8GB) - dedicated
+MAX_SCRAPE_WORKERS = 500  # Max for Railway Hobby (8GB) - dedicated
 
 _session_cache = {}
 _session_lock = threading.Lock()
 
 # File saving for sites.txt
 _sites_file_lock = threading.Lock()
-_sites_file_path = "sites.txt"
+# Use /data for Railway volume (persistent) or current dir for local
+_sites_file_path = "/data/sites.txt" if os.path.exists("/data") else "sites.txt"
 _saved_sites = set()  # Track what we've already saved to avoid duplicates
 
 def get_session(proxy=None):
@@ -5495,6 +5496,4 @@ Examples:
             traceback.print_exc()
 
 if __name__ == "__main__":
-
     main()
-
