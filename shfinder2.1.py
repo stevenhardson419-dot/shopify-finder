@@ -4225,108 +4225,129 @@ async def scrape_sites(chat_id, context, proxies):
     periodic_save_interval = 10.0
     last_milestone_sent = 0  # Track last 1000 milestone sent
     
-    with ThreadPoolExecutor(max_workers=workers + max(1, proxyless_workers)) as executor:
-        # Start proxy workers
-        futures = [executor.submit(scraper_worker) for _ in range(workers)]
-        # Start proxyless workers only if enabled
-        if proxyless_workers > 0:
-            proxyless_futures = [executor.submit(proxyless_scraper_worker) for _ in range(proxyless_workers)]
-        else:
-            proxyless_futures = []
-        all_futures = futures + proxyless_futures
+    # Store bot and message info for thread-safe updates
+    bot = context.bot
+    msg_id = msg.message_id
+    
+    def run_scraping():
+        """Run scraping entirely in thread - no async blocking"""
+        nonlocal searches, last_periodic_save, last_milestone_sent
         
-        last_update = time.time()
-        
-        while not all(future.done() for future in all_futures):
-            if stop_flags.get(chat_id, False):
-                user_data[chat_id]['scraping'] = False
-                for future in all_futures:
-                    if not future.done():
-                        future.cancel()
-                break
+        with ThreadPoolExecutor(max_workers=workers + max(1, proxyless_workers)) as executor:
+            # Start proxy workers
+            futures = [executor.submit(scraper_worker) for _ in range(workers)]
+            # Start proxyless workers only if enabled
+            if proxyless_workers > 0:
+                proxyless_futures = [executor.submit(proxyless_scraper_worker) for _ in range(proxyless_workers)]
+            else:
+                proxyless_futures = []
+            all_futures = futures + proxyless_futures
+            
+            last_update = time.time()
+            
+            while not all(future.done() for future in all_futures):
+                if stop_flags.get(chat_id, False):
+                    user_data[chat_id]['scraping'] = False
+                    for future in all_futures:
+                        if not future.done():
+                            future.cancel()
+                    break
+                    
+                time.sleep(0.5)  # Use time.sleep instead of await
+                current = time.time()
                 
-            await asyncio.sleep(0.5)  # Reduced from 2s for faster /stop response
-            current = time.time()
-            
-            # Periodic save every 10 seconds
-            if current - last_periodic_save >= periodic_save_interval:
-                with lock:
-                    if found:
-                        save_all_sites_to_file(list(found))
-                last_periodic_save = current
-            
-            # Auto-send sites every 1000 new sites
-            current_milestone = (len(found) // 1000) * 1000
-            if current_milestone > last_milestone_sent and current_milestone > 0:
-                last_milestone_sent = current_milestone
-                try:
-                    # Save latest sites first
+                # Periodic save every 10 seconds
+                if current - last_periodic_save >= periodic_save_interval:
                     with lock:
-                        save_all_sites_to_file(list(found))
-                    
-                    # Create and send file
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
-                        for site in sorted(found):
-                            f.write(f"{site}\n")
-                        temp_path = f.name
-                    
-                    with open(temp_path, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id,
-                            f,
-                            filename=f"sites_{len(found)}.txt",
-                            caption=f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"
-                        )
-                    os.unlink(temp_path)
-                    print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
-                except Exception as e:
-                    print(f"⚠️ Auto-send failed: {e}")
-            
-            # Check stop flag again after sleep for instant response
-            if stop_flags.get(chat_id, False):
-                user_data[chat_id]['scraping'] = False
-                for future in futures:
-                    if not future.done():
-                        future.cancel()
-                break
-            
-            if current - last_update >= 3:  # Increased from 2 to 3 seconds to avoid rate limits
-                with lock:
-                    elapsed = current - start_time
-                    rate = len(found) / max(1, searches) if searches > 0 else 0
-                    sites_per_min = (len(found) / max(1, elapsed)) * 60
-                    active_proxies = len(proxy_pool) - len(failed_proxies)
-                    
-                    proxyless_status = f"{proxyless_workers}" if proxyless_workers > 0 else "DISABLED"
-                    
+                        if found:
+                            save_all_sites_to_file(list(found))
+                    last_periodic_save = current
+                
+                # Auto-send sites every 1000 new sites (sync version)
+                current_milestone = (len(found) // 1000) * 1000
+                if current_milestone > last_milestone_sent and current_milestone > 0:
+                    last_milestone_sent = current_milestone
                     try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=msg.message_id,
-                            text=f"🔥 PROXY SCRAPER V6.1\n\n🎯 FOUND: {len(found)} SITES\n📊 Searches: {searches:,}\n⚡ Hit rate: {rate:.3f} sites/search\n🚀 Speed: {sites_per_min:.1f} sites/min\n⏱️ Time: {elapsed:.0f}s\n👥 Proxy Workers: {workers}\n🌐 Proxyless: {proxyless_status}\n🔍 Engines: {len(SEARCH_ENGINES)}\n📄 Pages per search: 50\n🔑 Keywords: {len(DORKS)}\n\n💡 /stop for instant results!"
-                        )
-                        last_update = current
+                        with lock:
+                            save_all_sites_to_file(list(found))
+                        
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                            for site in sorted(found):
+                                f.write(f"{site}\n")
+                            temp_path = f.name
+                        
+                        # Use requests to send file via Telegram API directly (no async)
+                        with open(temp_path, 'rb') as f:
+                            requests.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                data={'chat_id': chat_id, 'caption': f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"},
+                                files={'document': (f"sites_{len(found)}.txt", f)},
+                                timeout=30
+                            )
+                        os.unlink(temp_path)
+                        print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
                     except Exception as e:
-                        # Log but don't crash - might be rate limited or message unchanged
-                        print(f"⚠️ Update message failed: {e}")
+                        print(f"⚠️ Auto-send failed: {e}")
+                
+                # Check stop flag again
+                if stop_flags.get(chat_id, False):
+                    user_data[chat_id]['scraping'] = False
+                    for future in futures:
+                        if not future.done():
+                            future.cancel()
+                    break
+                
+                # Update status message (sync version via direct API)
+                if current - last_update >= 5:  # Update every 5 seconds
+                    with lock:
+                        elapsed = current - start_time
+                        rate = len(found) / max(1, searches) if searches > 0 else 0
+                        sites_per_min = (len(found) / max(1, elapsed)) * 60
+                        
+                        proxyless_status = f"{proxyless_workers}" if proxyless_workers > 0 else "DISABLED"
+                        
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                json={
+                                    'chat_id': chat_id,
+                                    'message_id': msg_id,
+                                    'text': f"🔥 PROXY SCRAPER V6.1\n\n🎯 FOUND: {len(found)} SITES\n📊 Searches: {searches:,}\n⚡ Hit rate: {rate:.3f} sites/search\n🚀 Speed: {sites_per_min:.1f} sites/min\n⏱️ Time: {elapsed:.0f}s\n👥 Proxy Workers: {workers}\n🌐 Proxyless: {proxyless_status}\n🔍 Engines: {len(SEARCH_ENGINES)}\n📄 Pages per search: 50\n🔑 Keywords: {len(DORKS)}\n\n💡 /stop for instant results!"
+                                },
+                                timeout=10
+                            )
+                            last_update = current
+                        except Exception as e:
+                            print(f"⚠️ Update message failed: {e}")
+        
+        # Final status
+        try:
+            elapsed = time.time() - start_time
+            status = "STOPPED" if stop_flags.get(chat_id, False) else "COMPLETE"
+            sites_per_min = (len(found) / max(1, elapsed)) * 60
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={
+                    'chat_id': chat_id,
+                    'message_id': msg_id,
+                    'text': f"🎉 {status} - V6.0 TURBO\n\n🎯 {len(found)} SHOPIFY SITES\n📊 Searches: {searches:,}\n⚡ Success: {len(found)/max(1,searches):.3f}\n🚀 Speed: {sites_per_min:.1f}/min\n⏱️ Time: {elapsed:.1f}s\n🔑 {len(DORKS)} keywords\n\n📁 Use /send to get file!"
+                },
+                timeout=10
+            )
+        except:
+            pass
+        
+        # Final save
+        with lock:
+            if found:
+                save_all_sites_to_file(list(found))
+        
+        user_data[chat_id]['found_sites'] = found
+        return found
     
-    try:
-        elapsed = time.time() - start_time
-        status = "STOPPED" if stop_flags.get(chat_id, False) else "COMPLETE"
-        sites_per_min = (len(found) / max(1, elapsed)) * 60
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            text=f"🎉 **{status} - V6.0 TURBO**\n\n🎯 **{len(found)} SHOPIFY SITES**\n📊 Searches: {searches:,}\n⚡ Success: {len(found)/max(1,searches):.3f}\n🚀 Speed: {sites_per_min:.1f}/min\n⏱️ Time: {elapsed:.1f}s\n🔑 {len(DORKS)} keywords\n🌐 Used {len(PROXYLESS_ENGINES)} proxyless engines (3 workers each)\n🏆 Download ready!",
-            parse_mode='Markdown'
-        )
-    except:
-        pass
-    
-    # Final save of all sites before returning
-    with lock:
-        if found:
-            save_all_sites_to_file(list(found))
+    # Run entirely in a separate thread - completely non-blocking
+    loop = asyncio.get_event_loop()
+    found = await loop.run_in_executor(None, run_scraping)
     
     stop_flags[chat_id] = False
     return list(found)
@@ -4476,117 +4497,119 @@ async def scrape_sites_proxyless_only(chat_id, context):
     total_workers = len(PROXYLESS_ENGINES) * workers_per_engine
     last_milestone_sent = 0  # Track last 1000 milestone sent
     
-    with ThreadPoolExecutor(max_workers=total_workers) as executor:
-        futures = []
-        for engine in PROXYLESS_ENGINES:
-            for worker_id in range(workers_per_engine):
-                futures.append(executor.submit(proxyless_engine_worker, engine, worker_id))
-        
+    # Store message info for thread-safe updates
+    msg_id = msg.message_id
+    
+    def run_proxyless_scraping():
+        """Run proxyless scraping entirely in thread - no async blocking"""
+        nonlocal searches, last_milestone_sent
         last_update = time.time()
         last_periodic_save = time.time()
         
-        while not all(future.done() for future in futures):
-            if stop_flags.get(chat_id, False):
-                user_data[chat_id]['scraping'] = False
-                break
+        with ThreadPoolExecutor(max_workers=total_workers) as executor:
+            futures = []
+            for engine in PROXYLESS_ENGINES:
+                for worker_id in range(workers_per_engine):
+                    futures.append(executor.submit(proxyless_engine_worker, engine, worker_id))
+            
+            while not all(future.done() for future in futures):
+                if stop_flags.get(chat_id, False):
+                    user_data[chat_id]['scraping'] = False
+                    break
+                    
+                time.sleep(0.5)  # Use time.sleep instead of await
+                current = time.time()
                 
-            await asyncio.sleep(0.5)
-            current = time.time()
-            
-            # Periodic save every 10 seconds
-            if current - last_periodic_save >= 10:
-                with lock:
-                    if found:
-                        save_all_sites_to_file(list(found))
-                last_periodic_save = current
-            
-            # Auto-send sites every 1000 new sites
-            current_milestone = (len(found) // 1000) * 1000
-            if current_milestone > last_milestone_sent and current_milestone > 0:
-                last_milestone_sent = current_milestone
-                try:
-                    # Save latest sites first
+                # Periodic save every 10 seconds
+                if current - last_periodic_save >= 10:
                     with lock:
-                        save_all_sites_to_file(list(found))
-                    
-                    # Create and send file
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
-                        for site in sorted(found):
-                            f.write(f"{site}\n")
-                        temp_path = f.name
-                    
-                    with open(temp_path, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id,
-                            f,
-                            filename=f"sites_{len(found)}.txt",
-                            caption=f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"
-                        )
-                    os.unlink(temp_path)
-                    print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
-                except Exception as e:
-                    print(f"⚠️ Auto-send failed: {e}")
-            
-            if current - last_update >= 3:  # 3 seconds to avoid rate limits
-                with lock:
-                    elapsed = current - start_time
-                    rate = len(found) / max(1, searches) if searches > 0 else 0
-                    sites_per_min = (len(found) / max(1, elapsed)) * 60
-                    
-                    # Top engines by performance
-                    top_engines = sorted(engine_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-                    top_str = '\n'.join([f"  • {name}: {count}" for name, count in top_engines if count > 0])
-                    
+                        if found:
+                            save_all_sites_to_file(list(found))
+                    last_periodic_save = current
+                
+                # Auto-send sites every 1000 new sites (sync version)
+                current_milestone = (len(found) // 1000) * 1000
+                if current_milestone > last_milestone_sent and current_milestone > 0:
+                    last_milestone_sent = current_milestone
                     try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=msg.message_id,
-                            text=f"🔥 PROXYLESS ULTRA V6.0\n\n"
-                                 f"🎯 FOUND: {len(found)} SITES\n"
-                                 f"📊 Searches: {searches:,}\n"
-                                 f"⚡ Hit rate: {rate:.3f}\n"
-                                 f"🚀 Speed: {sites_per_min:.1f} sites/min\n"
-                                 f"⏱️ Time: {elapsed:.0f}s\n"
-                                 f"🌐 Engines: {len(PROXYLESS_ENGINES)}\n"
-                                 f"👥 Workers: {total_workers}\n\n"
-                                 f"🏆 TOP ENGINES:\n{top_str if top_str else '  Starting...'}\n\n"
-                                 f"💡 /stop for instant results!"
-                        )
-                        last_update = current
+                        with lock:
+                            save_all_sites_to_file(list(found))
+                        
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                            for site in sorted(found):
+                                f.write(f"{site}\n")
+                            temp_path = f.name
+                        
+                        with open(temp_path, 'rb') as f:
+                            requests.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                data={'chat_id': chat_id, 'caption': f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"},
+                                files={'document': (f"sites_{len(found)}.txt", f)},
+                                timeout=30
+                            )
+                        os.unlink(temp_path)
+                        print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
                     except Exception as e:
-                        print(f"⚠️ Update message failed: {e}")
-    
-    # Final status
-    try:
-        elapsed = time.time() - start_time
-        status = "STOPPED" if stop_flags.get(chat_id, False) else "COMPLETE"
-        sites_per_min = (len(found) / max(1, elapsed)) * 60
+                        print(f"⚠️ Auto-send failed: {e}")
+                
+                # Update status message (sync version via direct API)
+                if current - last_update >= 5:
+                    with lock:
+                        elapsed = current - start_time
+                        rate = len(found) / max(1, searches) if searches > 0 else 0
+                        sites_per_min = (len(found) / max(1, elapsed)) * 60
+                        
+                        top_engines = sorted(engine_stats.items(), key=lambda x: x[1], reverse=True)[:5]
+                        top_str = '\n'.join([f"  • {name}: {count}" for name, count in top_engines if count > 0])
+                        
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                json={
+                                    'chat_id': chat_id,
+                                    'message_id': msg_id,
+                                    'text': f"🔥 PROXYLESS ULTRA V6.0\n\n🎯 FOUND: {len(found)} SITES\n📊 Searches: {searches:,}\n⚡ Hit rate: {rate:.3f}\n🚀 Speed: {sites_per_min:.1f} sites/min\n⏱️ Time: {elapsed:.0f}s\n🌐 Engines: {len(PROXYLESS_ENGINES)}\n👥 Workers: {total_workers}\n\n🏆 TOP ENGINES:\n{top_str if top_str else '  Starting...'}\n\n💡 /stop for instant results!"
+                                },
+                                timeout=10
+                            )
+                            last_update = current
+                        except Exception as e:
+                            print(f"⚠️ Update message failed: {e}")
         
-        top_engines = sorted(engine_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_str = '\n'.join([f"  • {name}: {count}" for name, count in top_engines if count > 0])
+        # Final status
+        try:
+            elapsed = time.time() - start_time
+            status = "STOPPED" if stop_flags.get(chat_id, False) else "COMPLETE"
+            sites_per_min = (len(found) / max(1, elapsed)) * 60
+            
+            top_engines = sorted(engine_stats.items(), key=lambda x: x[1], reverse=True)[:5]
+            top_str = '\n'.join([f"  • {name}: {count}" for name, count in top_engines if count > 0])
+            
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={
+                    'chat_id': chat_id,
+                    'message_id': msg_id,
+                    'text': f"🎉 {status} - PROXYLESS V6.0\n\n🎯 {len(found)} SHOPIFY SITES\n📊 Searches: {searches:,}\n⚡ Rate: {len(found)/max(1,searches):.3f}\n🚀 Speed: {sites_per_min:.1f}/min\n⏱️ Time: {elapsed:.1f}s\n\n🏆 TOP ENGINES:\n{top_str}\n\n📁 Use /send to get file!"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            print(f"⚠️ Final status message failed: {e}")
         
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            text=f"🎉 {status} - PROXYLESS V6.0\n\n"
-                 f"🎯 {len(found)} SHOPIFY SITES\n"
-                 f"📊 Searches: {searches:,}\n"
-                 f"⚡ Rate: {len(found)/max(1,searches):.3f}\n"
-                 f"🚀 Speed: {sites_per_min:.1f}/min\n"
-                 f"⏱️ Time: {elapsed:.1f}s\n\n"
-                 f"🏆 TOP ENGINES:\n{top_str}\n\n"
-                 f"📁 Download ready!"
-        )
-    except Exception as e:
-        print(f"⚠️ Final status message failed: {e}")
+        # Final save
+        with lock:
+            if found:
+                save_all_sites_to_file(list(found))
+        
+        user_data[chat_id]['found_sites'] = found
+        stop_flags[chat_id] = False
+        return list(found)
     
-    # Final save
-    with lock:
-        if found:
-            save_all_sites_to_file(list(found))
-    
-    stop_flags[chat_id] = False
-    return list(found)
+    # Run entirely in a separate thread - completely non-blocking
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, run_proxyless_scraping)
+    return result
 
 
 async def toggle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
