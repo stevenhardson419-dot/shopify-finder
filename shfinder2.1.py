@@ -4223,6 +4223,7 @@ async def scrape_sites(chat_id, context, proxies):
     # Start periodic saving task (every 10 seconds)
     last_periodic_save = time.time()
     periodic_save_interval = 10.0
+    last_milestone_sent = 0  # Track last 1000 milestone sent
     
     with ThreadPoolExecutor(max_workers=workers + max(1, proxyless_workers)) as executor:
         # Start proxy workers
@@ -4254,6 +4255,33 @@ async def scrape_sites(chat_id, context, proxies):
                         save_all_sites_to_file(list(found))
                 last_periodic_save = current
             
+            # Auto-send sites every 1000 new sites
+            current_milestone = (len(found) // 1000) * 1000
+            if current_milestone > last_milestone_sent and current_milestone > 0:
+                last_milestone_sent = current_milestone
+                try:
+                    # Save latest sites first
+                    with lock:
+                        save_all_sites_to_file(list(found))
+                    
+                    # Create and send file
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                        for site in sorted(found):
+                            f.write(f"{site}\n")
+                        temp_path = f.name
+                    
+                    with open(temp_path, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id,
+                            f,
+                            filename=f"sites_{len(found)}.txt",
+                            caption=f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"
+                        )
+                    os.unlink(temp_path)
+                    print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
+                except Exception as e:
+                    print(f"⚠️ Auto-send failed: {e}")
+            
             # Check stop flag again after sleep for instant response
             if stop_flags.get(chat_id, False):
                 user_data[chat_id]['scraping'] = False
@@ -4262,7 +4290,7 @@ async def scrape_sites(chat_id, context, proxies):
                         future.cancel()
                 break
             
-            if current - last_update >= 2:
+            if current - last_update >= 3:  # Increased from 2 to 3 seconds to avoid rate limits
                 with lock:
                     elapsed = current - start_time
                     rate = len(found) / max(1, searches) if searches > 0 else 0
@@ -4275,12 +4303,12 @@ async def scrape_sites(chat_id, context, proxies):
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=msg.message_id,
-                            text=f"🔥 **PROXY SCRAPER V6.1**\n\n🎯 **FOUND: {len(found)} SITES**\n📊 Searches: {searches:,}\n⚡ Hit rate: {rate:.3f} sites/search\n🚀 Speed: {sites_per_min:.1f} sites/min\n⏱️ Time: {elapsed:.0f}s\n👥 Proxy Workers: {workers}\n🌐 Proxyless: {proxyless_status}\n🔍 Engines: {len(SEARCH_ENGINES)}\n📄 Pages per search: 50\n🔑 Keywords: {len(DORKS)}\n\n💡 /stop for instant results!",
-                            parse_mode='Markdown'
+                            text=f"🔥 PROXY SCRAPER V6.1\n\n🎯 FOUND: {len(found)} SITES\n📊 Searches: {searches:,}\n⚡ Hit rate: {rate:.3f} sites/search\n🚀 Speed: {sites_per_min:.1f} sites/min\n⏱️ Time: {elapsed:.0f}s\n👥 Proxy Workers: {workers}\n🌐 Proxyless: {proxyless_status}\n🔍 Engines: {len(SEARCH_ENGINES)}\n📄 Pages per search: 50\n🔑 Keywords: {len(DORKS)}\n\n💡 /stop for instant results!"
                         )
                         last_update = current
-                    except:
-                        pass
+                    except Exception as e:
+                        # Log but don't crash - might be rate limited or message unchanged
+                        print(f"⚠️ Update message failed: {e}")
     
     try:
         elapsed = time.time() - start_time
@@ -4446,6 +4474,7 @@ async def scrape_sites_proxyless_only(chat_id, context):
     # Create 2 workers per engine (more causes rate limiting!)
     workers_per_engine = 2
     total_workers = len(PROXYLESS_ENGINES) * workers_per_engine
+    last_milestone_sent = 0  # Track last 1000 milestone sent
     
     with ThreadPoolExecutor(max_workers=total_workers) as executor:
         futures = []
@@ -4471,7 +4500,34 @@ async def scrape_sites_proxyless_only(chat_id, context):
                         save_all_sites_to_file(list(found))
                 last_periodic_save = current
             
-            if current - last_update >= 2:
+            # Auto-send sites every 1000 new sites
+            current_milestone = (len(found) // 1000) * 1000
+            if current_milestone > last_milestone_sent and current_milestone > 0:
+                last_milestone_sent = current_milestone
+                try:
+                    # Save latest sites first
+                    with lock:
+                        save_all_sites_to_file(list(found))
+                    
+                    # Create and send file
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                        for site in sorted(found):
+                            f.write(f"{site}\n")
+                        temp_path = f.name
+                    
+                    with open(temp_path, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id,
+                            f,
+                            filename=f"sites_{len(found)}.txt",
+                            caption=f"🎯 MILESTONE: {len(found):,} SITES!\n\n📤 Auto-sent at {current_milestone:,} sites\n⏱️ Time: {current - start_time:.0f}s"
+                        )
+                    os.unlink(temp_path)
+                    print(f"📤 Auto-sent {len(found)} sites at {current_milestone} milestone")
+                except Exception as e:
+                    print(f"⚠️ Auto-send failed: {e}")
+            
+            if current - last_update >= 3:  # 3 seconds to avoid rate limits
                 with lock:
                     elapsed = current - start_time
                     rate = len(found) / max(1, searches) if searches > 0 else 0
@@ -4485,21 +4541,20 @@ async def scrape_sites_proxyless_only(chat_id, context):
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=msg.message_id,
-                            text=f"🔥 **PROXYLESS ULTRA V6.0**\n\n"
-                                 f"🎯 **FOUND: {len(found)} SITES**\n"
+                            text=f"🔥 PROXYLESS ULTRA V6.0\n\n"
+                                 f"🎯 FOUND: {len(found)} SITES\n"
                                  f"📊 Searches: {searches:,}\n"
                                  f"⚡ Hit rate: {rate:.3f}\n"
                                  f"🚀 Speed: {sites_per_min:.1f} sites/min\n"
                                  f"⏱️ Time: {elapsed:.0f}s\n"
                                  f"🌐 Engines: {len(PROXYLESS_ENGINES)}\n"
-                                 f"👥 Workers: {total_workers} (5 per engine)\n\n"
-                                 f"🏆 **TOP ENGINES:**\n{top_str if top_str else '  Starting...'}\n\n"
-                                 f"💡 /stop for instant results!",
-                            parse_mode='Markdown'
+                                 f"👥 Workers: {total_workers}\n\n"
+                                 f"🏆 TOP ENGINES:\n{top_str if top_str else '  Starting...'}\n\n"
+                                 f"💡 /stop for instant results!"
                         )
                         last_update = current
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"⚠️ Update message failed: {e}")
     
     # Final status
     try:
@@ -4513,18 +4568,17 @@ async def scrape_sites_proxyless_only(chat_id, context):
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg.message_id,
-            text=f"🎉 **{status} - PROXYLESS V6.0**\n\n"
-                 f"🎯 **{len(found)} SHOPIFY SITES**\n"
+            text=f"🎉 {status} - PROXYLESS V6.0\n\n"
+                 f"🎯 {len(found)} SHOPIFY SITES\n"
                  f"📊 Searches: {searches:,}\n"
                  f"⚡ Rate: {len(found)/max(1,searches):.3f}\n"
                  f"🚀 Speed: {sites_per_min:.1f}/min\n"
                  f"⏱️ Time: {elapsed:.1f}s\n\n"
-                 f"🏆 **TOP ENGINES:**\n{top_str}\n\n"
-                 f"📁 Download ready!",
-            parse_mode='Markdown'
+                 f"🏆 TOP ENGINES:\n{top_str}\n\n"
+                 f"📁 Download ready!"
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"⚠️ Final status message failed: {e}")
     
     # Final save
     with lock:
