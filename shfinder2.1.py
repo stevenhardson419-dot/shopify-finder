@@ -3467,12 +3467,33 @@ def get_headers():
     }
 
 def parse_proxy(line, proxy_type="http"):
-    """Parse proxy line with support for http, socks4, socks5"""
+    """Parse proxy line with support for http, socks4, socks5, mix"""
     line = line.strip()
     if not line or line.startswith('#'):
         return None
     
-    # Remove any existing scheme
+    # For MIX type - keep existing scheme or default to http://
+    if proxy_type == "mix":
+        # Check if line already has a scheme
+        has_scheme = False
+        for scheme in ['http://', 'https://', 'socks4://', 'socks5://', 'socks4a://', 'socks5h://']:
+            if line.lower().startswith(scheme):
+                has_scheme = True
+                break
+        
+        if has_scheme:
+            # Already has scheme, return as-is (just validate format)
+            try:
+                if ':' in line:
+                    return line
+            except:
+                pass
+            return None
+        else:
+            # No scheme, treat as HTTP
+            proxy_type = "http"
+    
+    # Remove any existing scheme for non-mix types
     for scheme in ['http://', 'https://', 'socks4://', 'socks5://', 'socks4a://', 'socks5h://']:
         if line.lower().startswith(scheme):
             line = line[len(scheme):]
@@ -5070,7 +5091,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 InlineKeyboardButton("🌐 HTTP", callback_data="proxy_type:http"),
                 InlineKeyboardButton("🧦 SOCKS4", callback_data="proxy_type:socks4"),
-                InlineKeyboardButton("🧦 SOCKS5", callback_data="proxy_type:socks5")
+            ],
+            [
+                InlineKeyboardButton("🧦 SOCKS5", callback_data="proxy_type:socks5"),
+                InlineKeyboardButton("🌀 MIX", callback_data="proxy_type:mix")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -5082,7 +5106,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📁 **FILE RECEIVED**\n\n"
             f"📄 File: {safe_filename}\n"
             f"📊 Proxies found: {len(proxy_lines):,}\n\n"
-            f"🔧 **What type of proxies are these?**",
+            f"🔧 **What type of proxies are these?**\n"
+            f"(Use MIX if file has socks4://, socks5://, http:// prefixes)",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -5139,7 +5164,13 @@ async def handle_proxy_type_callback(update: Update, context: ContextTypes.DEFAU
     file_count = len(user_data[chat_id]['proxy_files'])
     total_unique = len(user_data[chat_id]['all_proxies'])
     
-    type_emoji = "🌐" if proxy_type == "http" else "🧦"
+    # Set emoji based on type
+    if proxy_type == "http":
+        type_emoji = "🌐"
+    elif proxy_type == "mix":
+        type_emoji = "🌀"
+    else:
+        type_emoji = "🧦"
     type_name = proxy_type.upper()
     
     await query.edit_message_text(
