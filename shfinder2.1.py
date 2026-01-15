@@ -3427,8 +3427,8 @@ MYSHOPIFY_RE_FULL = re.compile(r"https?://([a-z0-9\-]+)\.myshopify\.com[^\s<>\"'
 
 user_data = {}
 stop_flags = {}
-MAX_PROXY_WORKERS = 100
-MAX_SCRAPE_WORKERS = 50
+MAX_PROXY_WORKERS = 500
+MAX_SCRAPE_WORKERS = 300
 
 _session_cache = {}
 _session_lock = threading.Lock()
@@ -5497,3 +5497,4 @@ Examples:
 if __name__ == "__main__":
 
     main()
+
